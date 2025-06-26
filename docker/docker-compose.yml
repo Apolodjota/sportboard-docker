@@ -1,0 +1,334 @@
+version: '3.8'
+name: SportBoard-container
+
+services:
+    postgres:
+        image: postgres:13
+        deploy:
+            replicas: 1
+            restart_policy:
+                condition: any
+            placement:
+                constraints:
+                  - node.role == manager
+        environment:
+            POSTGRES_USER: kong
+            POSTGRES_DB: kong
+            POSTGRES_PASSWORD: kong
+        ports:
+            - "5432:5432"
+        networks:
+            - sportboard-network
+        volumes:
+            - kong-db-data:/var/lib/postgresql/data
+
+    kong-migrations:
+        image: kong:3.4
+        deploy:
+            replicas: 1
+            restart_policy:
+                condition: on-failure
+                max_attempts: 3
+        environment:
+            KONG_DATABASE: postgres
+            KONG_PG_HOST: postgres
+            KONG_PG_USER: kong
+            KONG_PG_PASSWORD: kong
+        command: kong migrations bootstrap
+        networks:
+            - sportboard-network
+
+    kong:
+        image: kong:3.4
+        deploy:
+            replicas: 1
+            restart_policy:
+                condition: on-failure
+        environment:
+            KONG_DATABASE: postgres
+            KONG_PG_HOST: postgres
+            KONG_PG_USER: kong
+            KONG_PG_PASSWORD: kong
+            KONG_PROXY_ACCESS_LOG: /dev/stdout
+            KONG_ADMIN_ACCESS_LOG: /dev/stdout
+            KONG_PROXY_ERROR_LOG: /dev/stderr
+            KONG_ADMIN_ERROR_LOG: /dev/stderr
+            KONG_ADMIN_LISTEN: 0.0.0.0:8001, 0.0.0.0:8444 ssl
+            KONG_ADMIN_GUI_URL: http://localhost:8002
+        ports:
+            - "8000:8000"
+            - "8443:8443"
+            - "8001:8001"
+            - "8444:8444"
+            - "8002:8002"
+        configs:
+            - source: kong_config
+              target: /kong.yml
+        command: >
+            sh -c "
+            kong config db_import /kong.yml &&
+            kong start
+            "
+        networks:
+            - sportboard-network
+
+    sqlserver:
+        image: mcr.microsoft.com/mssql/server:2019-latest
+        deploy:
+            replicas: 1
+            restart_policy:
+                condition: any
+            placement:
+                constraints:
+                  - node.role == manager
+        environment:
+            ACCEPT_EULA: "Y"
+            SA_PASSWORD: "Password123"
+        ports:
+            - "1433:1433"
+        networks:
+            - sportboard-network
+        volumes:
+            - sqlserver_data:/var/opt/mssql
+
+    catalogs:
+        image: sportboard/catalogs:latest
+        deploy:
+            replicas: 1
+            restart_policy:
+                condition: any
+        environment:
+            - ASPNETCORE_ENVIRONMENT=Development
+            - ConnectionStrings__DefaultConnection=Server=sqlserver;Database=Catalogs;User=sa;Password=Password123;TrustServerCertificate=True
+            - ASPNETCORE_URLS=http://0.0.0.0:5241
+        ports:
+            - "5241:5241"
+        networks:
+            - sportboard-network
+
+    mariadb-real-time:
+        image: mariadb:10.6
+        deploy:
+            replicas: 1
+            restart_policy:
+                condition: any
+            placement:
+                constraints:
+                  - node.role == manager
+        environment:
+            MYSQL_ROOT_PASSWORD: root_password
+            MYSQL_DATABASE: my_database
+            MYSQL_USER: my_user
+            MYSQL_PASSWORD: my_password
+        ports:
+            - "3306:3306"
+        volumes:
+            - mariadb_data:/var/lib/mysql
+        networks:
+            - sportboard-network
+
+    ms3-real-time:
+        image: sportboard/real-time:latest
+        deploy:
+            replicas: 1
+            restart_policy:
+                condition: any
+        environment:
+            - FLASK_APP=/source/run.py
+            - FLASK_ENV=development
+            - DATABASE_URL=mysql+pymysql://my_user:my_password@mariadb-real-time:3306/my_database
+        ports:
+            - "5001:5001"
+        volumes:
+            - static_volume:/app/staticfiles
+        networks:
+            - sportboard-network
+
+    postgres-competencies:
+        image: postgres:13
+        deploy:
+            replicas: 1
+            restart_policy:
+                condition: any
+            placement:
+                constraints:
+                  - node.role == manager
+        environment:
+            POSTGRES_USER: competencies_user
+            POSTGRES_DB: competencies_db
+            POSTGRES_PASSWORD: competencies_password
+        ports:
+            - "5433:5432"
+        networks:
+            - sportboard-network
+        volumes:
+            - postgres_competencies_data:/var/lib/postgresql/data
+
+    ms2-competencies:
+        image: sportboard/competencies:latest
+        deploy:
+            replicas: 1
+            restart_policy:
+                condition: any
+        command: > 
+            sh -c "python manage.py makemigrations competition_management &&
+            python manage.py migrate competition_management &&
+             gunicorn competencies.wsgi:application --bind 0.0.0.0:8003"
+        environment:
+            - DJANGO_SETTINGS_MODULE=competencies.settings
+            - DATABASE_URL=postgres://competencies_user:competencies_password@postgres-competencies:5432/competencies_db
+        ports:
+            - "8003:8003"
+        networks:
+            - sportboard-network
+
+    ms5-calendar:
+        image: sportboard/calendar:latest
+        deploy:
+            replicas: 1
+            restart_policy:
+                condition: any
+        ports:
+            - "9000:8080"
+        networks:
+            - sportboard-network
+
+    ms5-calendar-database:
+        image: postgres:13
+        deploy:
+            replicas: 1
+            restart_policy:
+                condition: any
+            placement:
+                constraints:
+                  - node.role == manager
+        environment:
+            POSTGRES_USER: calendar
+            POSTGRES_DB: calendar_db
+            POSTGRES_PASSWORD: admin
+        ports:
+            - "5435:5432"
+        networks:
+            - sportboard-network
+        volumes:
+            - calendar_postgres_data:/var/lib/postgresql/data
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U calendar"]
+            interval: 30s
+            timeout: 30s
+            retries: 3
+
+    calendar-migrations:
+        image: kong:3.5
+        deploy:
+            replicas: 1
+            restart_policy:
+                condition: on-failure
+                max_attempts: 3
+        environment:
+            KONG_DATABASE: postgres
+            KONG_PG_HOST: ms5-calendar-database
+            KONG_PG_USER: calendar
+            KONG_PG_PASSWORD: admin
+        command: kong migrations bootstrap
+        networks:
+            - sportboard-network
+
+    ms4-estadisticas:
+        image: sportboard/estadisticas:latest
+        deploy:
+            replicas: 1
+            restart_policy:
+                condition: any
+        ports:
+            - "3000:3000"
+        environment:
+            MONGODB_URI: mongodb://admin:password@mongodb-estadisticas:27017/sportboard?authSource=admin
+            PORT: 3000
+        networks:
+            - sportboard-network
+        healthcheck:
+            test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 40s
+
+    mongodb-estadisticas:
+        image: mongo:latest
+        deploy:
+            replicas: 1
+            restart_policy:
+                condition: any
+            placement:
+                constraints:
+                  - node.role == manager
+        environment:
+            MONGO_INITDB_ROOT_USERNAME: admin
+            MONGO_INITDB_ROOT_PASSWORD: password
+            MONGO_INITDB_DATABASE: sportboard
+        ports:
+            - "27018:27017"
+        volumes:
+            - mongodb_estadisticas_data:/data/db
+        networks:
+            - sportboard-network
+        healthcheck:
+            test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+            interval: 10s
+            timeout: 10s
+            retries: 5
+            start_period: 40s
+
+    postgres-usermanagement:
+        image: postgres:13
+        deploy:
+            replicas: 1
+            restart_policy:
+                condition: any
+            placement:
+                constraints:
+                  - node.role == manager
+        environment:
+            POSTGRES_USER: 'postgres'
+            POSTGRES_DB: 'user_manage'
+            POSTGRES_PASSWORD: '11012000'
+        ports:
+            - "5434:5432"
+        networks:
+            - sportboard-network
+        volumes:
+            - postgres_usermanagement_data:/var/lib/postgresql/data
+
+    ms1-usermanagement:
+        image: sportboard/usermanagement:latest
+        deploy:
+            replicas: 1
+            restart_policy:
+                condition: any
+        environment:
+            - DJANGO_SETTINGS_MODULE=users.settings
+            - DATABASE_URL=postgres://postgres:11012000@postgres-usermanagement:5432/user_manage
+        ports:
+            - "8004:8004"
+        networks:
+            - sportboard-network
+
+networks:
+    sportboard-network:
+        driver: overlay
+        attachable: true
+
+volumes:
+    mariadb_data:
+    static_volume:
+    kong-db-data:
+    mongodb_estadisticas_data:
+    sqlserver_data:
+    postgres_competencies_data:
+    calendar_postgres_data:
+    postgres_usermanagement_data:
+
+configs:
+    kong_config:
+        file: ./api-gateway/kong.yml

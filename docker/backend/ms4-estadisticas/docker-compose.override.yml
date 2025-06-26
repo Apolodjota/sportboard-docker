@@ -1,0 +1,10 @@
+services:
+  
+
+  
+volumes:
+  mongodb_estadisticas_data:
+
+networks:
+  sportboard-network:
+    external: true

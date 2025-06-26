@@ -1,0 +1,10 @@
+services:
+  
+
+
+networks:
+  sportboard-network:
+    external: true
+
+volumes:
+  kong-db-data:
